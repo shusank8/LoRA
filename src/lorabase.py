@@ -55,11 +55,30 @@ class LoraLinear(nn.Linear, LoraBase):
 
 
 
-test_model = LoraLinear(4, 8, 2, 2)
-x = torch.randn(2, 4)
-o1 = test_model(x)
 
-ln = test_model.merge_weight()
-o2 = ln(x)
+# lora for embedding layer
+    
+class LoraEmbedding(nn.Embedding, LoraBase):
+    def __init__(self, vocab_size, embdim, rank = 8, alpha = 8, dropout = 0):
+        nn.Embedding.__init__(self, vocab_size, embdim)
+        LoraBase.__init__(self, rank, alpha, dropout)
+        self.weight.requires_grad  = False
+        self.lora_A = nn.Parameter(torch.zeros(vocab_size, rank))
+        self.lora_B = nn.Parameter(torch.zeros(rank, embdim))
 
-print(o1==o2)
+        # do initialization
+
+        # weights merging 
+    def merge_weights(self):
+            mw = self.weight + (self.lora_A @ self.lora_B)
+            state_dict = {"weight":mw}
+            emb_layer = nn.Embedding(self.num_embeddings, self.embedding_dim)
+            emb_layer.load_state_dict(state_dict)
+            return emb_layer
+
+    def forward(self, x):
+            emb_out = F.embedding(x, self.weight)
+            lora_emb = F.embedding(x, self.lora_A)
+            lora_out = (lora_emb @ self.lora_B) * self.scaling
+            return emb_out + lora_out
+
