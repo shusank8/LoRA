@@ -139,3 +139,93 @@ class LoraConv2d(nn.Conv2d, LoraBase):
         ) * self.scailing
         lora_rank_output = lora_rank_output.permute(0, 3, 1, 2)
         return orig_layer_out + lora_rank_output
+    
+
+class LoraModel(nn.Module):
+
+    def __init__(self, model, config):
+        super(LoraModel, self).__init__()
+        self.model = model
+        self.config = config
+        self.trainable_params = self.compute_parameters_wolora()
+        self.disable_all_gradients()
+        self.apply_lora(self.model)
+        self.toggle_bias()
+
+    def compute_parameters_wolora(self):
+        total_param = 0
+        for param in self.model.parameters():
+            if param.requires_grad:
+                total_param += param.numel()
+        return total_param
+
+    def disable_all_gradients(self):
+        for name, param in self.model.named_parameters():
+            if any([ex in name for ex in self.config["exclude_modules"]]) is False:
+                param.requires_grad = False
+
+    def apply_lora(self, module):
+        for name, child in module.named_children():
+            if any([tgt in name for tgt in self.config["target_modules"]]) is True:
+                if isinstance(child, nn.Linear):
+                    new_layer = LoraLinear(
+                        in_features=child.in_features,
+                        out_features=child.out_features,
+                        bias=True if child.bias is not None else False,
+                        rank=self.config["rank"],
+                        alpha=self.config["alpha"],
+                        dropout=self.config["dropout"],
+                    )
+                    new_layer.load_pretrained_weights(child.state_dict())
+
+                    setattr(module, name, new_layer)
+
+            if (len(list(child.children())) > 0) and not any(
+                [ex in name for ex in self.config["exclude_modules"]]
+            ):
+                self.apply_lora(child)
+
+    def toggle_bias(self):
+        for name, param in self.model.named_parameters():
+            if not any([ex in name for ex in self.config["exclude_modules"]]):
+                if ".bias" in name:
+                    if self.config["bias"] == "none":
+                        param.requires_grad = False
+                    if self.config["bias"] == "all":
+                        param.requires_grad = True
+                    if (
+                        self.config["bias"] == "lora_only"
+                        and any([tgt in name for tgt in self.config["target_modules"]])
+                        is True
+                    ):
+                        param.requires_grad = True
+
+    def m_weights(self, module):
+        for name, child in module.named_children():
+            if isinstance(child, LoraLinear):
+                merged_layer = child.merge_weights()
+                setattr(module, name, merged_layer)
+            if len(list(child.children())) > 0:
+                self.m_weights(child)
+
+    def save_model(self, path, merge_wights=False):
+        if merge_wights is True:
+            self.m_weights(self.model)
+
+            state_dict = {
+                name.replace("model.", ""): param.detach().cpu()
+                for (name, param) in self.model.named_parameters()
+            }
+
+        else:
+            state_dict = {
+                name: param.detach().cpu()
+                for (name, param) in self.model.named_parameters()
+                if param.requires_grad
+            }
+
+        # TODO: save file implement
+        # save_file(state_dict, path)
+
+    def forward(self, *inputs, **kwargs):
+        return self.model(*inputs, **kwargs)
